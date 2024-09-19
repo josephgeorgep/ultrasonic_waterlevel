@@ -1,0 +1,141 @@
+esphome:
+  name: $devicename
+  platform: ESP8266
+  board: esp01_1m
+
+substitutions:
+  devicename: ultrasonic_tanklevel
+
+globals:
+  - id: update_counter
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: updating
+    type: bool
+    restore_value: no
+    initial_value: 'true'
+  - id: sensor_interval_enabled
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+sensor:
+  - platform: ultrasonic
+    trigger_pin: GPIO14
+    echo_pin: GPIO12
+    id: water_height
+    name: water_height
+    pulse_time: 0.00001s
+    filters:
+      - filter_out: nan
+      - calibrate_linear:
+          - 0.20 -> 1.10
+          - 2.41 -> 0.0
+    update_interval: never  # Disable automatic measurement; we'll manually trigger this.
+
+    on_value:
+      then:
+        - lambda: |-
+            if (id(updating)) {
+              float raw_value = id(water_height).state;  // Get the raw sensor reading
+              id(raw_ultrasonic_value).publish_state(raw_value);  // Publish raw sensor value
+              id(water_liter).publish_state(raw_value * 1155);  // Water liter calculation
+              id(water_percent).publish_state((raw_value / 1.5) * 100);  // Water percentage calculation
+              ESP_LOGI("custom", "Published water liter: %f, water percent: %f, raw ultrasonic value: %f", raw_value * 1155, (raw_value / 1.5) * 100, raw_value);
+            } else {
+              ESP_LOGI("custom", "Not publishing sensor values - in idle state.");
+            }
+
+  - platform: template
+    name: "Raw Ultrasonic Data"
+    id: raw_ultrasonic_value
+    icon: 'mdi:water-outline'
+    unit_of_measurement: 'm'
+    accuracy_decimals: 3
+    update_interval: never  # Only updated manually when ultrasonic sensor measures.
+
+  - platform: template
+    name: water_liter
+    id: water_liter
+    icon: 'mdi:water'
+    unit_of_measurement: 'l'
+    accuracy_decimals: 0
+    update_interval: never
+
+  - platform: template
+    name: water_percent
+    id: water_percent
+    icon: 'mdi:water-percent'
+    unit_of_measurement: '%'
+    update_interval: never
+
+  - platform: wifi_signal
+    name: "$devicename-WiFi"
+    update_interval: 3600s
+
+text_sensor:
+  - platform: template
+    name: "Sensor Status"
+    id: sensor_leyam_status
+    icon: 'mdi:timer'
+    update_interval: 5s
+    lambda: |-
+      if (id(updating)) {
+        return {"Measuring"};
+      } else {
+        return {"Idle"};
+      }
+
+switch:
+  - platform: template
+    name: "Measure Tank Now"
+    id: manual_update_switch
+    optimistic: true
+    turn_on_action:
+      - lambda: |-
+          id(updating) = true;
+          id(update_counter) = 0;
+          id(sensor_interval_enabled) = true;
+          ESP_LOGI("custom", "Manual update triggered. Starting new 20-minute cycle.");
+          id(manual_update_switch).turn_off();
+
+interval:
+  - interval: 5s
+    then:
+      - lambda: |-
+          if (id(updating)) {
+            if (!id(sensor_interval_enabled)) {
+              id(sensor_interval_enabled) = true;
+              ESP_LOGI("custom", "Started ultrasonic sensor measurements.");
+            }
+            id(water_height).update();  // Trigger ultrasonic sensor update
+
+            id(update_counter) += 5;
+            if (id(update_counter) >= 1200) {  // 20 minutes = 1200 seconds
+              id(updating) = false;
+              id(update_counter) = 0;
+              id(sensor_interval_enabled) = false;
+              ESP_LOGI("custom", "Stopping updates for 1 hour");
+            }
+          }
+
+  - interval: 1h
+    then:
+      - lambda: |-
+          if (!id(updating)) {
+            id(updating) = true;
+            id(sensor_interval_enabled) = true;
+            ESP_LOGI("custom", "Resuming updates for 20 minutes.");
+          }
+
+binary_sensor:
+  - platform: template
+    name: "Ultrasonic Active"
+    lambda: |-
+      return id(sensor_interval_enabled);
+    device_class: "running"
+
+
+
+<<: !include ../../common.yaml
